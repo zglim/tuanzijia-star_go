@@ -146,8 +146,8 @@ func log(lv logLv, v ...interface{}) {
 		return
 	}
 
-	// 记录日志
-	_, file, line, ok := runtime.Caller(3)
+	// 记录调用来源：公开入口直接调用 log，故向上回溯 2 层定位到业务调用处
+	_, file, line, ok := runtime.Caller(2)
 	if !ok {
 		return
 	}
@@ -167,42 +167,24 @@ func log(lv logLv, v ...interface{}) {
 	}
 }
 
+// 以下为对外暴露的各级别日志入口，统一转发到 log，由 log 负责级别过滤、
+// 调用位置记录与异步投递，无需再保留一层只做转发的内部函数。
 func DebugLog(v ...interface{}) {
-	debugLog(v...)
-}
-
-func InfoLog(v ...interface{}) {
-	infoLog(v...)
-}
-
-func WarnLog(v ...interface{}) {
-	warnLog(v...)
-}
-
-func ErrorLog(v ...interface{}) {
-	errorLog(v...)
-}
-
-func FatalLog(v ...interface{}) {
-	fatalLog(v...)
-}
-
-func debugLog(v ...interface{}) {
 	log(Debug, v...)
 }
 
-func infoLog(v ...interface{}) {
+func InfoLog(v ...interface{}) {
 	log(Info, v...)
 }
 
-func warnLog(v ...interface{}) {
+func WarnLog(v ...interface{}) {
 	log(Warn, v...)
 }
 
-func errorLog(v ...interface{}) {
+func ErrorLog(v ...interface{}) {
 	log(Error, v...)
 }
 
-func fatalLog(v ...interface{}) {
+func FatalLog(v ...interface{}) {
 	log(Fatal, v...)
 }
