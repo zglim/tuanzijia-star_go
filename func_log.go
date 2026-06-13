@@ -14,6 +14,10 @@ type logObj struct {
 	logInfo string
 }
 
+// ---------------------------------------------------------------------------
+// 日志系统生命周期
+// ---------------------------------------------------------------------------
+
 func logStart() {
 	goForLog(func(Stop chan struct{}) {
 		for logForStopSignal == 0 {
@@ -26,6 +30,44 @@ func logStart() {
 		}
 	})
 }
+
+// StartLog 初始化日志系统：创建目录、打开各级别日志文件。只会执行一次。
+func StartLog(dirPatch string, lv logLv) {
+	logOnce.Do(func() {
+		logNowLv = lv
+		logDirPath = dirPatch
+		// 文件夹路径不存在就创建
+		if !IsDirExists(dirPatch) {
+			if err := os.MkdirAll(dirPatch, os.ModePerm|os.ModeTemporary); err != nil {
+				fmt.Printf("创建日志文件夹错误，错误信息:%v", err)
+			}
+		}
+
+		for logLv, logName := range logLvNameMap {
+			// 低于当前等级的日志不打开文件
+			if logLv < lv {
+				continue
+			}
+
+			// 得到最终的文件绝对路径
+			fileName := fmt.Sprintf("%v.log", logName)
+			fileAbsolutePath := filepath.Join(dirPatch, fileName)
+
+			// 打开文件(如果文件存在就以写模式打开，并追加写入；如果文件不存在就创建，然后以写模式打开。)
+			f, err := os.OpenFile(fileAbsolutePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModePerm|os.ModeTemporary)
+			if err != nil {
+				fmt.Printf("打开%v日志文件错误，错误信息:%v", fileName, err)
+			}
+
+			// 将文件流保存
+			logFileMap[logLv] = f
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 日志写入与轮转
+// ---------------------------------------------------------------------------
 
 func writeLog(log *logObj) {
 	logMutex.Lock()
@@ -89,52 +131,45 @@ func reorganizeLog(nowTime time.Time) {
 	}
 }
 
-func StartLog(dirPatch string, lv logLv) {
-	logOnce.Do(func() {
-		logNowLv = lv
-		logDirPath = dirPatch
-		// 文件夹路径不存在就创建
-		if !IsDirExists(dirPatch) {
-			if err := os.MkdirAll(dirPatch, os.ModePerm|os.ModeTemporary); err != nil {
-				fmt.Printf("创建日志文件夹错误，错误信息:%v", err)
-			}
-		}
+// ---------------------------------------------------------------------------
+// 调用栈信息
+// ---------------------------------------------------------------------------
 
-		for logLv, logName := range logLvNameMap {
-			// 低于当前等级的日志不打开文件
-			if logLv < lv {
-				continue
-			}
-
-			// 得到最终的文件绝对路径
-			fileName := fmt.Sprintf("%v.log", logName)
-			fileAbsolutePath := filepath.Join(dirPatch, fileName)
-
-			// 打开文件(如果文件存在就以写模式打开，并追加写入；如果文件不存在就创建，然后以写模式打开。)
-			f, err := os.OpenFile(fileAbsolutePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.ModePerm|os.ModeTemporary)
-			if err != nil {
-				fmt.Printf("打开%v日志文件错误，错误信息:%v", fileName, err)
-			}
-
-			// 将文件流保存
-			logFileMap[logLv] = f
-		}
-	})
+// callerInfo 返回指定调用栈层级的 "文件路径:行号" 信息。
+// skip 的含义与 runtime.Caller 的 skip 参数一致：
+//
+//	0 = callerInfo 自身
+//	1 = 调用 callerInfo 的函数
+//	2 = 再上一层，以此类推
+func callerInfo(skip int) string {
+	_, file, line, ok := runtime.Caller(skip)
+	if !ok {
+		return "unknown:0"
+	}
+	// 截取最后两层目录，保持与旧版 SimpleTack 一致的输出格式
+	i := strings.LastIndex(file, "/") + 1
+	i = strings.LastIndex(file[:i-1], "/") + 1
+	return fmt.Sprintf("%s:%d", file[i:], line)
 }
 
+// SimpleTack 返回调用 SimpleTack 的上层函数的 "文件:行号" 信息（向后兼容）。
+func SimpleTack() string {
+	return callerInfo(2)
+}
+
+// Stack 将当前协程的完整调用栈以 Error 级别写入日志。
 func Stack() {
 	buf := make([]byte, 1<<12)
 	log(Error, string(buf[:runtime.Stack(buf, false)]))
 }
 
-func SimpleTack() string {
-	_, file, line, _ := runtime.Caller(2)
-	i := strings.LastIndex(file, "/") + 1
-	i = strings.LastIndex((string)(([]byte(file))[:i-1]), "/") + 1
+// ---------------------------------------------------------------------------
+// 日志核心投递
+// ---------------------------------------------------------------------------
 
-	return fmt.Sprintf("%s:%d", (string)(([]byte(file))[i:]), line)
-}
-
+// log 是所有日志级别共用的内部投递函数。
+// 调用链：外部调用者 -> DebugLog/InfoLog/... -> log
+// 因此 runtime.Caller(2) 取到的是外部调用者的位置。
 func log(lv logLv, v ...interface{}) {
 	if lv < logNowLv {
 		return
@@ -146,14 +181,14 @@ func log(lv logLv, v ...interface{}) {
 		return
 	}
 
-	// 记录日志
-	_, file, line, ok := runtime.Caller(3)
+	// 记录调用来源：log(0) -> DebugLog等(1) -> 实际调用者(2)
+	_, file, line, ok := runtime.Caller(2)
 	if !ok {
 		return
 	}
 
 	i := strings.LastIndex(file, "/") + 1
-	logContent := fmt.Sprintf("[%s][%s][%s:%d]:", lvName, time.Now().Format("2006-01-02 15:04:05"), (string)(([]byte(file))[i:]), line)
+	logContent := fmt.Sprintf("[%s][%s][%s:%d]:", lvName, time.Now().Format("2006-01-02 15:04:05"), file[i:], line)
 	if len(v) > 1 {
 		logContent += fmt.Sprintf(v[0].(string), v[1:]...)
 	} else {
@@ -167,42 +202,21 @@ func log(lv logLv, v ...interface{}) {
 	}
 }
 
-func DebugLog(v ...interface{}) {
-	debugLog(v...)
-}
+// ---------------------------------------------------------------------------
+// 对外日志入口（保持原有 API 不变）
+// ---------------------------------------------------------------------------
 
-func InfoLog(v ...interface{}) {
-	infoLog(v...)
-}
+// DebugLog 输出 Debug 级别日志
+func DebugLog(v ...interface{}) { log(Debug, v...) }
 
-func WarnLog(v ...interface{}) {
-	warnLog(v...)
-}
+// InfoLog 输出 Info 级别日志
+func InfoLog(v ...interface{}) { log(Info, v...) }
 
-func ErrorLog(v ...interface{}) {
-	errorLog(v...)
-}
+// WarnLog 输出 Warn 级别日志
+func WarnLog(v ...interface{}) { log(Warn, v...) }
 
-func FatalLog(v ...interface{}) {
-	fatalLog(v...)
-}
+// ErrorLog 输出 Error 级别日志
+func ErrorLog(v ...interface{}) { log(Error, v...) }
 
-func debugLog(v ...interface{}) {
-	log(Debug, v...)
-}
-
-func infoLog(v ...interface{}) {
-	log(Info, v...)
-}
-
-func warnLog(v ...interface{}) {
-	log(Warn, v...)
-}
-
-func errorLog(v ...interface{}) {
-	log(Error, v...)
-}
-
-func fatalLog(v ...interface{}) {
-	log(Fatal, v...)
-}
+// FatalLog 输出 Fatal 级别日志
+func FatalLog(v ...interface{}) { log(Fatal, v...) }
