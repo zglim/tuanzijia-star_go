@@ -3,7 +3,6 @@ package starGo
 import (
 	"io"
 	"net"
-	"sync"
 	"time"
 )
 
@@ -12,21 +11,16 @@ type ClientCallBack func(message []byte, addr string)
 type ClientExpireCallBack func(addr []string)
 
 type Client struct {
+	BaseClient
 	conn         net.Conn
-	stop         bool
-	activeTime   int64
 	receiveQueue []byte
-	sendCh       chan []byte
-	mutex        sync.RWMutex
 }
 
 func newTcpClient(conn net.Conn) *Client {
 	return &Client{
+		BaseClient:   newBaseClient(),
 		conn:         conn,
-		stop:         false,
-		activeTime:   time.Now().Unix(),
 		receiveQueue: make([]byte, 0),
-		sendCh:       make(chan []byte, 1024),
 	}
 }
 
@@ -36,28 +30,14 @@ func (c *Client) GetConn() net.Conn {
 	return c.conn
 }
 
-func (c *Client) GetStop() bool {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return c.stop
+// Close 关闭底层 TCP 连接，实现 clientConnection 接口。
+func (c *Client) Close() error {
+	return c.GetConn().Close()
 }
 
-func (c *Client) SetStop() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.stop = true
-}
-
-func (c *Client) GetActiveTime() int64 {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return c.activeTime
-}
-
-func (c *Client) SetActiveTime() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.activeTime = time.Now().Unix()
+// Addr 返回客户端地址字符串，实现 clientConnection 接口。
+func (c *Client) Addr() string {
+	return c.GetConn().RemoteAddr().String()
 }
 
 func (c *Client) GetReceiveData(headerLen int32) (message []byte, exists bool) {
@@ -97,15 +77,11 @@ func (c *Client) AppendReceiveQueue(message []byte) {
 	c.receiveQueue = append(c.receiveQueue, message...)
 }
 
-func (c *Client) AppendSendQueue(message []byte) {
-	c.sendCh <- message
-}
-
 func (c *Client) start() {
+	// 读协程：负责从连接读取数据并分发到业务回调
 	Go(func(Stop chan struct{}) {
 		defer func() {
-			_ = c.GetConn().Close()
-			c.SetStop()
+			shutdownConn(c)
 		}()
 		for !c.GetStop() {
 			readBytes := make([]byte, 1024)
@@ -117,38 +93,27 @@ func (c *Client) start() {
 				break
 			}
 			c.AppendReceiveQueue(readBytes[:n])
+			c.SetActiveTime()
 
 			Go2(func() {
 				message, exists := c.GetReceiveData(tcpReceiveDataHeaderLen)
 				if exists && tcpHandlerReceiveFunc != nil {
-					tcpHandlerReceiveFunc(message, c.GetConn().RemoteAddr().String())
+					tcpHandlerReceiveFunc(message, c.Addr())
 				}
 			})
 		}
 	})
-	Go(func(Stop chan struct{}) {
-		for !c.GetStop() {
-			select {
-			case message := <-c.sendCh:
-				Go2(func() {
-					header := Int32ToBytes(int32(len(message)), true)
-					header = append(header, message...)
-					_, err := c.GetConn().Write(header)
-					if err != nil {
-						ErrorLog("向客户端:%v发送数据出错,错误信息:%v", c.GetConn().RemoteAddr().String(), err)
-						_ = c.GetConn().Close()
-						c.SetStop()
-					}
-				})
-			case <-Stop:
-				return
-			}
-		}
+	// 写协程：负责从发送队列取数据写入连接，复用通用发送循环
+	sendLoopWithChannel(c, c.sendCh, func(message []byte) error {
+		header := Int32ToBytes(int32(len(message)), true)
+		header = append(header, message...)
+		_, err := c.GetConn().Write(header)
+		return err
 	})
 }
 
 func registerTcpClient(c *Client) {
-	tcpClientMap.Store(c.GetConn().RemoteAddr().String(), c)
+	tcpClientMap.Store(c.Addr(), c)
 }
 
 func clearExpireTcpClient() {
@@ -156,43 +121,7 @@ func clearExpireTcpClient() {
 		t := time.NewTicker(5 * time.Second)
 		for allForStopSignal == 0 {
 			<-t.C
-			removeClient := make([]string, 0)
-			tcpClientMap.Range(func(key, value interface{}) bool {
-				client := value.(*Client)
-				if client.GetActiveTime()+clientExpireTime <= time.Now().Unix() {
-					removeClient = append(removeClient, key.(string))
-				}
-
-				return true
-			})
-
-			// 移除过期的客户端
-			callBackList := make([]string, 0)
-			for _, key := range removeClient {
-				value, exists := tcpClientMap.Load(key)
-				if !exists {
-					continue
-				}
-
-				// 再次判断是否过期，防止将要移除时有发生通信的事件
-				client := value.(*Client)
-				if client.GetActiveTime()+clientExpireTime > time.Now().Unix() {
-					continue
-				}
-
-				// 移除过期客户端
-				client.SetStop()
-				_ = client.GetConn().Close()
-				tcpClientMap.Delete(key)
-				callBackList = append(callBackList, key)
-			}
-
-			if len(callBackList) > 0 {
-				InfoLog("移除过期客户端连接:%v", callBackList)
-				if tcpClientExpireHandleFunc != nil {
-					tcpClientExpireHandleFunc(callBackList)
-				}
-			}
+			cleanExpiredClients(&tcpClientMap, tcpClientExpireHandleFunc)
 		}
 	})
 }

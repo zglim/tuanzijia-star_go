@@ -1,26 +1,20 @@
 package starGo
 
 import (
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 type WebSocketClient struct {
-	conn       *websocket.Conn
-	stop       bool
-	activeTime int64
-	sendCh     chan []byte
-	mutex      sync.RWMutex
+	BaseClient
+	conn *websocket.Conn
 }
 
 func newWebSocketClient(conn *websocket.Conn) *WebSocketClient {
 	return &WebSocketClient{
+		BaseClient: newBaseClient(),
 		conn:       conn,
-		stop:       false,
-		activeTime: time.Now().Unix(),
-		sendCh:     make(chan []byte, 1024),
 	}
 }
 
@@ -30,28 +24,14 @@ func (c *WebSocketClient) GetConn() *websocket.Conn {
 	return c.conn
 }
 
-func (c *WebSocketClient) GetStop() bool {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return c.stop
+// Close 关闭底层 WebSocket 连接，实现 clientConnection 接口。
+func (c *WebSocketClient) Close() error {
+	return c.GetConn().Close()
 }
 
-func (c *WebSocketClient) SetStop() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.stop = true
-}
-
-func (c *WebSocketClient) GetActiveTime() int64 {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return c.activeTime
-}
-
-func (c *WebSocketClient) SetActiveTime() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.activeTime = time.Now().Unix()
+// Addr 返回客户端地址字符串，实现 clientConnection 接口。
+func (c *WebSocketClient) Addr() string {
+	return c.GetConn().RemoteAddr().String()
 }
 
 func (c *WebSocketClient) GetReceiveData(headerLen int32, data []byte) (message []byte, exists bool) {
@@ -82,15 +62,11 @@ func (c *WebSocketClient) GetReceiveData(headerLen int32, data []byte) (message 
 	return
 }
 
-func (c *WebSocketClient) AppendSendQueue(message []byte) {
-	c.sendCh <- message
-}
-
 func (c *WebSocketClient) start() {
+	// 读协程：负责从连接读取消息并分发到业务回调
 	Go(func(Stop chan struct{}) {
 		defer func() {
-			_ = c.GetConn().Close()
-			c.SetStop()
+			shutdownConn(c)
 		}()
 		for !c.GetStop() {
 			_, data, err := c.GetConn().ReadMessage()
@@ -98,77 +74,32 @@ func (c *WebSocketClient) start() {
 				ErrorLog("读取消息错误:%v", err)
 				break
 			}
+			c.SetActiveTime()
 
 			Go2(func() {
 				message, exists := c.GetReceiveData(wsReceiveDataHeaderLen, data)
 				if exists && wsHandlerReceiveFunc != nil {
-					wsHandlerReceiveFunc(message, c.GetConn().RemoteAddr().String())
+					wsHandlerReceiveFunc(message, c.Addr())
 				}
 			})
 		}
 	})
-	Go(func(Stop chan struct{}) {
-		for !c.GetStop() {
-			select {
-			case message := <-c.sendCh:
-				Go2(func() {
-					err := c.GetConn().WriteMessage(websocket.BinaryMessage, message)
-					if err != nil {
-						ErrorLog("向客户端:%v发送数据出错,错误信息:%v", c.GetConn().RemoteAddr().String(), err)
-						_ = c.GetConn().Close()
-						c.SetStop()
-					}
-				})
-			case <-Stop:
-				return
-			}
-		}
+	// 写协程：负责从发送队列取数据写入连接，复用通用发送循环
+	sendLoopWithChannel(c, c.sendCh, func(message []byte) error {
+		return c.GetConn().WriteMessage(websocket.BinaryMessage, message)
 	})
 }
 
 func registerWebSocketClient(c *WebSocketClient) {
-	wsClientMap.Store(c.GetConn().RemoteAddr().String(), c)
+	wsClientMap.Store(c.Addr(), c)
 }
 
 func clearExpireWebSocketClient() {
 	Go(func(Stop chan struct{}) {
+		t := time.NewTicker(5 * time.Second)
 		for allForStopSignal == 0 {
-			t := time.NewTicker(5 * time.Second)
 			<-t.C
-			removeClient := make([]string, 0)
-			wsClientMap.Range(func(key, value interface{}) bool {
-				client := value.(*WebSocketClient)
-				if client.GetActiveTime()+clientExpireTime <= time.Now().Unix() {
-					removeClient = append(removeClient, key.(string))
-				}
-
-				return true
-			})
-
-			// 移除过期的客户端
-			callBackList := make([]string, 0)
-			for _, key := range removeClient {
-				value, exists := wsClientMap.Load(key)
-				if !exists {
-					continue
-				}
-
-				// 再次判断是否过期，防止将要移除时有发生通信的事件
-				client := value.(*WebSocketClient)
-				if client.GetActiveTime()+clientExpireTime > time.Now().Unix() {
-					continue
-				}
-
-				// 移除过期客户端
-				client.SetStop()
-				_ = client.GetConn().Close()
-				wsClientMap.Delete(key)
-				callBackList = append(callBackList, key)
-			}
-
-			if len(callBackList) > 0 && wsClientExpireHandleFunc != nil {
-				wsClientExpireHandleFunc(callBackList)
-			}
+			cleanExpiredClients(&wsClientMap, wsClientExpireHandleFunc)
 		}
 	})
 }
