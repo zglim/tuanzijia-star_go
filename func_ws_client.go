@@ -1,26 +1,20 @@
 package starGo
 
 import (
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 type WebSocketClient struct {
-	conn       *websocket.Conn
-	stop       bool
-	activeTime int64
-	sendCh     chan []byte
-	mutex      sync.RWMutex
+	baseClient
+	conn *websocket.Conn
 }
 
 func newWebSocketClient(conn *websocket.Conn) *WebSocketClient {
 	return &WebSocketClient{
+		baseClient: newBaseClient(conn, conn.RemoteAddr().String()),
 		conn:       conn,
-		stop:       false,
-		activeTime: time.Now().Unix(),
-		sendCh:     make(chan []byte, 1024),
 	}
 }
 
@@ -28,30 +22,6 @@ func (c *WebSocketClient) GetConn() *websocket.Conn {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.conn
-}
-
-func (c *WebSocketClient) GetStop() bool {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return c.stop
-}
-
-func (c *WebSocketClient) SetStop() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.stop = true
-}
-
-func (c *WebSocketClient) GetActiveTime() int64 {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return c.activeTime
-}
-
-func (c *WebSocketClient) SetActiveTime() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.activeTime = time.Now().Unix()
 }
 
 func (c *WebSocketClient) GetReceiveData(headerLen int32, data []byte) (message []byte, exists bool) {
@@ -82,48 +52,38 @@ func (c *WebSocketClient) GetReceiveData(headerLen int32, data []byte) (message 
 	return
 }
 
-func (c *WebSocketClient) AppendSendQueue(message []byte) {
-	c.sendCh <- message
-}
-
+// start 启动 WebSocket 客户端的读、写两个协程。读写协程的循环骨架与连接关闭收口都
+// 复用 baseClient，这里只注入 WebSocket 特有的读取与写出逻辑。
 func (c *WebSocketClient) start() {
 	Go(func(Stop chan struct{}) {
-		defer func() {
-			_ = c.GetConn().Close()
-			c.SetStop()
-		}()
-		for !c.GetStop() {
-			_, data, err := c.GetConn().ReadMessage()
-			if err != nil {
-				ErrorLog("读取消息错误:%v", err)
-				break
-			}
-
-			Go2(func() {
-				message, exists := c.GetReceiveData(wsReceiveDataHeaderLen, data)
-				if exists && wsHandlerReceiveFunc != nil {
-					wsHandlerReceiveFunc(message, c.GetConn().RemoteAddr().String())
-				}
-			})
-		}
+		c.runReceiveLoop(c.readOnce, c.dispatch)
 	})
 	Go(func(Stop chan struct{}) {
-		for !c.GetStop() {
-			select {
-			case message := <-c.sendCh:
-				Go2(func() {
-					err := c.GetConn().WriteMessage(websocket.BinaryMessage, message)
-					if err != nil {
-						ErrorLog("向客户端:%v发送数据出错,错误信息:%v", c.GetConn().RemoteAddr().String(), err)
-						_ = c.GetConn().Close()
-						c.SetStop()
-					}
-				})
-			case <-Stop:
-				return
-			}
-		}
+		c.runSendLoop(Stop, c.writeOnce)
 	})
+}
+
+// readOnce 读取一条完整的 WebSocket 消息帧；出错时返回 ok=false 以结束读协程。
+func (c *WebSocketClient) readOnce() (payload []byte, ok bool) {
+	_, data, err := c.GetConn().ReadMessage()
+	if err != nil {
+		ErrorLog("读取消息错误:%v", err)
+		return nil, false
+	}
+	return data, true
+}
+
+// dispatch 按头部长度从消息帧中拆出内容并回调业务处理函数。
+func (c *WebSocketClient) dispatch(data []byte) {
+	message, exists := c.GetReceiveData(wsReceiveDataHeaderLen, data)
+	if exists && wsHandlerReceiveFunc != nil {
+		wsHandlerReceiveFunc(message, c.GetConn().RemoteAddr().String())
+	}
+}
+
+// writeOnce 以二进制帧的形式将一条消息写出到连接。
+func (c *WebSocketClient) writeOnce(message []byte) error {
+	return c.GetConn().WriteMessage(websocket.BinaryMessage, message)
 }
 
 func registerWebSocketClient(c *WebSocketClient) {
@@ -159,9 +119,8 @@ func clearExpireWebSocketClient() {
 					continue
 				}
 
-				// 移除过期客户端
-				client.SetStop()
-				_ = client.GetConn().Close()
+				// 移除过期客户端，统一通过 shutdown 收口连接关闭与停止状态
+				client.shutdown()
 				wsClientMap.Delete(key)
 				callBackList = append(callBackList, key)
 			}

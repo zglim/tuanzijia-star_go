@@ -50,8 +50,7 @@ func systemExit() {
 	// 关闭所有tcp连接
 	tcpClientMap.Range(func(key, value interface{}) bool {
 		client := value.(*Client)
-		client.SetStop()
-		client.GetConn().Close()
+		client.shutdown()
 		tcpClientMap.Delete(key)
 
 		return true
@@ -66,8 +65,7 @@ func systemExit() {
 	// 关闭所有webSocket连接
 	wsClientMap.Range(func(key, value interface{}) bool {
 		client := value.(*WebSocketClient)
-		client.SetStop()
-		_ = client.GetConn().Close()
+		client.shutdown()
 		wsClientMap.Delete(key)
 		return true
 	})

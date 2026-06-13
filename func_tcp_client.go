@@ -3,7 +3,6 @@ package starGo
 import (
 	"io"
 	"net"
-	"sync"
 	"time"
 )
 
@@ -12,21 +11,16 @@ type ClientCallBack func(message []byte, addr string)
 type ClientExpireCallBack func(addr []string)
 
 type Client struct {
+	baseClient
 	conn         net.Conn
-	stop         bool
-	activeTime   int64
 	receiveQueue []byte
-	sendCh       chan []byte
-	mutex        sync.RWMutex
 }
 
 func newTcpClient(conn net.Conn) *Client {
 	return &Client{
+		baseClient:   newBaseClient(conn, conn.RemoteAddr().String()),
 		conn:         conn,
-		stop:         false,
-		activeTime:   time.Now().Unix(),
 		receiveQueue: make([]byte, 0),
-		sendCh:       make(chan []byte, 1024),
 	}
 }
 
@@ -34,30 +28,6 @@ func (c *Client) GetConn() net.Conn {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.conn
-}
-
-func (c *Client) GetStop() bool {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return c.stop
-}
-
-func (c *Client) SetStop() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.stop = true
-}
-
-func (c *Client) GetActiveTime() int64 {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-	return c.activeTime
-}
-
-func (c *Client) SetActiveTime() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.activeTime = time.Now().Unix()
 }
 
 func (c *Client) GetReceiveData(headerLen int32) (message []byte, exists bool) {
@@ -97,54 +67,46 @@ func (c *Client) AppendReceiveQueue(message []byte) {
 	c.receiveQueue = append(c.receiveQueue, message...)
 }
 
-func (c *Client) AppendSendQueue(message []byte) {
-	c.sendCh <- message
-}
-
+// start 启动 TCP 客户端的读、写两个协程。读写协程的循环骨架与连接关闭收口都复用
+// baseClient，这里只负责注入 TCP 特有的读取、解析与封帧写出逻辑。
 func (c *Client) start() {
 	Go(func(Stop chan struct{}) {
-		defer func() {
-			_ = c.GetConn().Close()
-			c.SetStop()
-		}()
-		for !c.GetStop() {
-			readBytes := make([]byte, 1024)
-			n, err := c.GetConn().Read(readBytes)
-			if err != nil {
-				if err != io.EOF {
-					ErrorLog("读取消息错误：%s，本次读取的字节数为：%d", err, n)
-				}
-				break
-			}
-			c.AppendReceiveQueue(readBytes[:n])
-
-			Go2(func() {
-				message, exists := c.GetReceiveData(tcpReceiveDataHeaderLen)
-				if exists && tcpHandlerReceiveFunc != nil {
-					tcpHandlerReceiveFunc(message, c.GetConn().RemoteAddr().String())
-				}
-			})
-		}
+		c.runReceiveLoop(c.readOnce, c.dispatch)
 	})
 	Go(func(Stop chan struct{}) {
-		for !c.GetStop() {
-			select {
-			case message := <-c.sendCh:
-				Go2(func() {
-					header := Int32ToBytes(int32(len(message)), true)
-					header = append(header, message...)
-					_, err := c.GetConn().Write(header)
-					if err != nil {
-						ErrorLog("向客户端:%v发送数据出错,错误信息:%v", c.GetConn().RemoteAddr().String(), err)
-						_ = c.GetConn().Close()
-						c.SetStop()
-					}
-				})
-			case <-Stop:
-				return
-			}
-		}
+		c.runSendLoop(Stop, c.writeOnce)
 	})
+}
+
+// readOnce 读取一段原始字节并追加到接收缓冲区；返回的 payload 不携带数据，实际的
+// 粘包拆分在 dispatch 中从缓冲区完成。出错时返回 ok=false 以结束读协程。
+func (c *Client) readOnce() (payload []byte, ok bool) {
+	readBytes := make([]byte, 1024)
+	n, err := c.GetConn().Read(readBytes)
+	if err != nil {
+		if err != io.EOF {
+			ErrorLog("读取消息错误：%s，本次读取的字节数为：%d", err, n)
+		}
+		return nil, false
+	}
+	c.AppendReceiveQueue(readBytes[:n])
+	return nil, true
+}
+
+// dispatch 从接收缓冲区按头部长度拆出一条完整消息并回调业务处理函数。
+func (c *Client) dispatch(_ []byte) {
+	message, exists := c.GetReceiveData(tcpReceiveDataHeaderLen)
+	if exists && tcpHandlerReceiveFunc != nil {
+		tcpHandlerReceiveFunc(message, c.GetConn().RemoteAddr().String())
+	}
+}
+
+// writeOnce 按“长度头 + 内容”的格式将一条消息写出到连接。
+func (c *Client) writeOnce(message []byte) error {
+	header := Int32ToBytes(int32(len(message)), true)
+	header = append(header, message...)
+	_, err := c.GetConn().Write(header)
+	return err
 }
 
 func registerTcpClient(c *Client) {
@@ -180,9 +142,8 @@ func clearExpireTcpClient() {
 					continue
 				}
 
-				// 移除过期客户端
-				client.SetStop()
-				_ = client.GetConn().Close()
+				// 移除过期客户端，统一通过 shutdown 收口连接关闭与停止状态
+				client.shutdown()
 				tcpClientMap.Delete(key)
 				callBackList = append(callBackList, key)
 			}
