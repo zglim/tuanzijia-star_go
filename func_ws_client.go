@@ -132,7 +132,7 @@ func registerWebSocketClient(c *WebSocketClient) {
 
 func clearExpireWebSocketClient() {
 	Go(func(Stop chan struct{}) {
-		for allForStopSignal == 0 {
+		for lifecycle.allForStopSignal == 0 {
 			t := time.NewTicker(5 * time.Second)
 			<-t.C
 			removeClient := make([]string, 0)

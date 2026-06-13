@@ -154,7 +154,7 @@ func registerTcpClient(c *Client) {
 func clearExpireTcpClient() {
 	Go(func(Stop chan struct{}) {
 		t := time.NewTicker(5 * time.Second)
-		for allForStopSignal == 0 {
+		for lifecycle.allForStopSignal == 0 {
 			<-t.C
 			removeClient := make([]string, 0)
 			tcpClientMap.Range(func(key, value interface{}) bool {

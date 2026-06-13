@@ -37,7 +37,7 @@ func RegisterThirtyMinuteFunc(funcName string, f timerFunc) {
 func timerStart() {
 	Go(func(Stop chan struct{}) {
 		t := time.NewTicker(1 * time.Second)
-		for allForStopSignal == 0 {
+		for lifecycle.allForStopSignal == 0 {
 			select {
 			case <-Stop:
 				return

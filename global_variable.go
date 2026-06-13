@@ -10,10 +10,8 @@ import (
 )
 
 var (
-	maxBigInt64Edge  = big.NewInt(0).Add(big.NewInt(math.MaxInt64), big.NewInt(1))
-	baseString       = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	allForStopSignal int32
-	logForStopSignal int32
+	maxBigInt64Edge = big.NewInt(0).Add(big.NewInt(math.MaxInt64), big.NewInt(1))
+	baseString      = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 	logDirPath   string
 	logFileMap   map[logLv]*os.File
@@ -29,20 +27,13 @@ var (
 		Fatal: "fatal",
 	}
 
-	waitAllGroup   sync.WaitGroup
-	waitLogGroup   sync.WaitGroup
-	goCount        int32
-	goId           uint64
-	stopChanForGo  = make(chan struct{})
-	stopChanForLog = make(chan struct{})
+	goCount int32
+	goId    uint64
 
 	timerMutex       sync.RWMutex
 	oneMinuteFunc    map[string]timerFunc
 	fiveMinuteFunc   map[string]timerFunc
 	thirtyMinuteFunc map[string]timerFunc
-
-	systemExitFunc   []func()
-	systemReloadFunc []func()
 
 	tcpClientMap              sync.Map
 	udpClientMap              sync.Map

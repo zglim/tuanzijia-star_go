@@ -19,7 +19,7 @@ func StartTcpServer(addr string, handler ClientCallBack, clientExpireHandler Cli
 			_ = listen.Close()
 		})
 
-		for allForStopSignal == 0 {
+		for lifecycle.allForStopSignal == 0 {
 			c, err := listen.Accept()
 			if err != nil {
 				ErrorLog("接收客户端连接失败,错误信息:%v", err)

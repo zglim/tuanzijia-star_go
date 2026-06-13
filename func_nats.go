@@ -64,7 +64,7 @@ func SubscribeChannel(channel string, channelCount int32, cb NatCallBack) {
 				_ = sub.Drain()
 			}()
 
-			for allForStopSignal == 0 {
+			for lifecycle.allForStopSignal == 0 {
 				msg := <-ch
 				if cb != nil {
 					result := &NatResult{

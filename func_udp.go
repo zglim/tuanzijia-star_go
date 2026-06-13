@@ -52,7 +52,7 @@ func listen(conn *net.UDPConn) {
 
 func listenTrue(conn *net.UDPConn) {
 	data := make([]byte, 1024)
-	for allForStopSignal == 0 {
+	for lifecycle.allForStopSignal == 0 {
 		n, udpAddr, err := conn.ReadFromUDP(data)
 
 		if err != nil {

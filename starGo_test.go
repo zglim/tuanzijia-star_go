@@ -16,12 +16,12 @@ func TestInfoLog(t *testing.T) {
 	InfoLog("qwe")
 	go func() {
 		time.Sleep(61 * time.Second)
-		stopChanForLog <- struct{}{}
+		lifecycle.stopChanForLog <- struct{}{}
 
 		for i := int32(0); i < goCount; i++ {
-			stopChanForGo <- struct{}{}
+			lifecycle.stopChanForGo <- struct{}{}
 		}
-		//atomic.CompareAndSwapInt32(&allForStopSignal, 0, 1)
+		//atomic.CompareAndSwapInt32(&lifecycle.allForStopSignal, 0, 1)
 	}()
 	go func() {
 		for {
@@ -108,13 +108,13 @@ func TestNatPublish(t *testing.T) {
 
 	go func() {
 		time.Sleep(10 * time.Second)
-		stopChanForLog <- struct{}{}
+		lifecycle.stopChanForLog <- struct{}{}
 
-		//stopChanForGo <- struct{}{}
+		//lifecycle.stopChanForGo <- struct{}{}
 
 		for i := int32(0); i < goCount; i++ {
 			fmt.Println(i)
-			stopChanForGo <- struct{}{}
+			lifecycle.stopChanForGo <- struct{}{}
 		}
 	}()
 	WaitForSystemExit()
