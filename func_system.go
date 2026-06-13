@@ -58,6 +58,9 @@ func systemExit() {
 	})
 
 	// 关闭所有udp连接
+	if defaultUdpServer != nil {
+		defaultUdpServer.shutdown()
+	}
 	udpClientMap.Range(func(key, value interface{}) bool {
 		udpClientMap.Delete(key)
 		return true
